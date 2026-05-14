@@ -23,3 +23,6 @@ navvix_v13/api_apt01_out.dxf
 examples/v16/*.dxf
 examples/v16/*.png
 examples/v16/*.pdf
+
+# Local mirrors of files downloaded from production server
+server_files/

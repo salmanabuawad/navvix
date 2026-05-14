@@ -81,6 +81,38 @@ def write_meta(job_id: str, meta: dict):
 # Job processing
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _process_single(job_id: str, meta: dict):
+    """Run isolate + dimension on a single-drawing job dir. Mutates meta."""
+    d = job_dir(job_id)
+    iso = d / "isolated_main.dxf"
+    dim = d / "dimensioned.dxf"
+    png = d / "preview.png"
+    pdf = d / "preview.pdf"
+
+    isolate(d / "input.dxf", iso)
+
+    if MODEL_PATH.exists():
+        from navvix_v13.applier import apply as apply_v13
+        gen_report = apply_v13(iso, dim, MODEL_PATH)
+        meta["model_used"] = "v13_learned"
+    else:
+        gen_report = generate(iso, dim)
+        meta["model_used"] = "v12_rules"
+
+    gen_preview(dim, png, pdf, tuple(gen_report["bbox"]))
+
+    x_axes = gen_report["x_axes"]
+    y_axes = gen_report["y_axes"]
+    meta.update({
+        "status":        "done",
+        "done_at":       datetime.now(timezone.utc).isoformat(),
+        "x_axes":        x_axes if isinstance(x_axes, int) else len(x_axes),
+        "y_axes":        y_axes if isinstance(y_axes, int) else len(y_axes),
+        "dims_total":    gen_report.get("internal_count", len(gen_report.get("dimensions", []))),
+        "dims_internal": gen_report.get("internal_count", 0),
+    })
+
+
 def process_job(job_id: str):
     d = job_dir(job_id)
     meta = read_meta(job_id)
@@ -88,35 +120,59 @@ def process_job(job_id: str):
     meta["started_at"] = datetime.now(timezone.utc).isoformat()
     write_meta(job_id, meta)
     try:
-        iso = d / "isolated_main.dxf"
-        dim = d / "dimensioned.dxf"
-        png = d / "preview.png"
-        pdf = d / "preview.pdf"
+        # Multi-drawing detection: if the upload contains N>=2 apartment sheets,
+        # split into N child jobs and process each independently. The parent
+        # job becomes a no-op record (kind="batch") so the upload is still
+        # discoverable in the job list.
+        from navvix_v12.split import split_drawing
+        splits_dir = d / "splits"
+        try:
+            children = split_drawing(d / "input.dxf", splits_dir)
+        except Exception:
+            children = []
 
-        iso_report = isolate(d / "input.dxf", iso)
+        if children:
+            child_ids: list[str] = []
+            for child_input, label in children:
+                cid = uuid.uuid4().hex
+                cd = job_dir(cid); cd.mkdir()
+                shutil.copy(child_input, cd / "input.dxf")
+                cmeta = {
+                    "id":         cid,
+                    "parent_id":  job_id,
+                    "filename":   f"{meta.get('filename', 'input.dxf')} [{label}]",
+                    "size_bytes": (cd / "input.dxf").stat().st_size,
+                    "status":     "pending",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "model_used": meta.get("model_used"),
+                }
+                write_meta(cid, cmeta)
+                child_ids.append(cid)
 
-        # Use learned model if available, else fall back to v12 rules
-        if MODEL_PATH.exists():
-            from navvix_v13.applier import apply as apply_v13
-            gen_report = apply_v13(iso, dim, MODEL_PATH)
-            meta["model_used"] = "v13_learned"
-        else:
-            gen_report = generate(iso, dim)
-            meta["model_used"] = "v12_rules"
+            meta.update({
+                "kind":     "batch",
+                "children": child_ids,
+                "status":   "done",
+                "done_at":  datetime.now(timezone.utc).isoformat(),
+            })
+            write_meta(job_id, meta)
 
-        gen_preview(dim, png, pdf, tuple(gen_report["bbox"]))
+            # Process children sequentially in the same background task
+            for cid in child_ids:
+                try:
+                    cmeta_now = read_meta(cid)
+                    cmeta_now["status"] = "processing"
+                    cmeta_now["started_at"] = datetime.now(timezone.utc).isoformat()
+                    write_meta(cid, cmeta_now)
+                    _process_single(cid, cmeta_now)
+                    write_meta(cid, cmeta_now)
+                except Exception:
+                    err_meta = read_meta(cid)
+                    err_meta.update({"status": "error", "error": traceback.format_exc()})
+                    write_meta(cid, err_meta)
+            return
 
-        # v13 applier returns x_axes/y_axes as ints; v12 returns lists
-        x_axes = gen_report["x_axes"]
-        y_axes = gen_report["y_axes"]
-        meta.update({
-            "status":        "done",
-            "done_at":       datetime.now(timezone.utc).isoformat(),
-            "x_axes":        x_axes if isinstance(x_axes, int) else len(x_axes),
-            "y_axes":        y_axes if isinstance(y_axes, int) else len(y_axes),
-            "dims_total":    gen_report.get("internal_count", len(gen_report.get("dimensions", []))),
-            "dims_internal": gen_report.get("internal_count", 0),
-        })
+        _process_single(job_id, meta)
     except Exception:
         meta.update({"status": "error", "error": traceback.format_exc()})
     write_meta(job_id, meta)
