@@ -113,22 +113,26 @@ def _collect_records(doc):
 
 def _cluster_records(records):
     """DBSCAN-style proximity clustering. Returns list of (cluster_id, seed_indices)."""
-    all_pts = []
-    for r in records:
-        b = r["bbox"]
-        all_pts += [(b[0], b[1]), (b[2], b[3])]
-    global_bbox = _bbox(all_pts)
-    gx1, gy1, gx2, gy2 = global_bbox
-    gw, gh = gx2 - gx1, gy2 - gy1
-
     seeds = [r for r in records
              if r["type"] in ("LINE", "LWPOLYLINE", "POLYLINE")
              and max(r["w"], r["h"]) > 1]
     if not seeds:
         raise RuntimeError("No vector geometry found.")
 
+    # Use ONLY vector geometry for the global bbox. Existing DIMENSION
+    # entities can have extension defpoints far outside the actual walls,
+    # which would inflate gw/gh and shrink eps relative to the real plan.
+    geom_pts = []
+    for r in seeds:
+        b = r["bbox"]
+        geom_pts += [(b[0], b[1]), (b[2], b[3])]
+    global_bbox = _bbox(geom_pts)
+    gx1, gy1, gx2, gy2 = global_bbox
+    gw, gh = gx2 - gx1, gy2 - gy1
+
     centers = np.array([r["center"] for r in seeds], dtype=float)
-    eps = max(180.0, min(gw, gh) * 0.022)
+    # Generous eps so a single apartment's walls don't fragment into pieces.
+    eps = max(250.0, min(gw, gh) * 0.10)
 
     visited = np.zeros(len(seeds), dtype=bool)
     clusters = []
@@ -187,17 +191,22 @@ def _score_clusters(seeds, clusters, global_bbox):
         relative_area = area / g_area
 
         # ── HARD REJECTION rules (req #1) ────────────────────────────────────
-        # Mega-rectangle covering most of the sheet = page frame / border.
-        is_mega = (bw > gw * 0.70 and bh > gh * 0.70)
+        # A frame is BIG + SPARSE. An apartment is BIG + DENSE. Combine size
+        # with density so a standalone apartment (which fills its own file's
+        # bbox) is NOT rejected as a frame.
+        fills_global = (bw > gw * 0.70 and bh > gh * 0.70)
+        is_mega = fills_global and density < 5e-6
         # Too few entities for a real plan.
-        is_sparse = count < 20
+        is_sparse = count < 12
         # Low density + large area = frame outline with title strip.
-        is_low_density_giant = (relative_area > 0.30 and density < 5e-6)
-        # Tall/narrow grid at the edges = schedule table.
+        is_low_density_giant = (relative_area > 0.40 and density < 1e-6)
+        # Tall/narrow grid at the edges with low count = schedule table.
         is_table = (grid_score > 0.85
-                    and (aspect > 2.4 or nx > 0.70 or ny > 0.85 or ny < 0.15))
-        # Frame-like: rectangular and proportional to page.
-        is_frame = (bw > gw * 0.60 and bh > gh * 0.50 and count < 100)
+                    and (aspect > 2.4 or nx > 0.70 or ny > 0.85 or ny < 0.15)
+                    and count < 80)
+        # Frame-like: rectangular, proportional, AND sparse.
+        is_frame = (bw > gw * 0.60 and bh > gh * 0.50
+                    and density < 5e-6 and count < 80)
 
         hard_reject = is_mega or is_sparse or is_low_density_giant or is_table or is_frame
         reject_reasons = []
@@ -420,6 +429,143 @@ def _semantic_merge(raw_edges, arch_bbox):
 
     semantic = [ed for ed in semantic if ed["len"] >= final_min_len]
     return semantic, filtered_out, base
+
+
+def _filter_staircase(edges, base):
+    """
+    Drop edges that form evenly-spaced runs (stair treads, hatching, repeated
+    fixtures). Detection: ≥4 positions with the same (rounded-center,
+    rounded-length) bucket AND evenly spaced.
+
+    Ported from navvix_v13.applier._filter_staircase. v18 dropped this; the
+    sample comparison showed stair treads getting dimensioned (400/400/120/120)
+    so it's restored.
+    """
+    if not edges:
+        return [], []
+
+    match_tol   = max(20.0, base * 0.020)
+    spacing_var = 0.35
+    min_treads  = 4
+
+    span_positions: dict[tuple, list[float]] = {}
+    for ed in edges:
+        center = (ed["a"] + ed["b"]) / 2
+        key = (ed["ori"],
+               round(center / match_tol) * match_tol,
+               round(ed["len"] / match_tol) * match_tol)
+        span_positions.setdefault(key, []).append(ed["c"])
+
+    stair_keys: set[tuple] = set()
+    for key, positions in span_positions.items():
+        if len(positions) < min_treads:
+            continue
+        ps = sorted(positions)
+        cur_run = 2
+        for i in range(1, len(ps) - 1):
+            d_prev = ps[i] - ps[i - 1]
+            d_next = ps[i + 1] - ps[i]
+            if d_prev > 0 and abs(d_next - d_prev) / d_prev <= spacing_var:
+                cur_run += 1
+                if cur_run >= min_treads:
+                    stair_keys.add(key)
+                    break
+            else:
+                cur_run = 2
+
+    if not stair_keys:
+        return edges, []
+
+    kept, dropped = [], []
+    for ed in edges:
+        center = (ed["a"] + ed["b"]) / 2
+        key = (ed["ori"],
+               round(center / match_tol) * match_tol,
+               round(ed["len"] / match_tol) * match_tol)
+        if key in stair_keys:
+            dropped.append({**ed, "reason": "staircase_run"})
+        else:
+            kept.append(ed)
+    return kept, dropped
+
+
+def _dedup_near_identical(edges, base):
+    """
+    Drop near-duplicate edges that would produce stacked dimensions. Two
+    edges are duplicates if same orientation, perpendicular axis (c) within
+    tolerance, and parallel-axis span overlap ≥ 80%. Keep the longer.
+
+    Without this the sample comparison shows 4 stacked '280' rows.
+    """
+    if not edges:
+        return [], []
+
+    pos_tol = max(15.0, base * 0.015)
+    overlap_thresh = 0.80
+
+    sorted_edges = sorted(edges, key=lambda e: e["len"], reverse=True)
+    kept: list[dict] = []
+    dropped: list[dict] = []
+
+    for ed in sorted_edges:
+        is_dup = False
+        for k in kept:
+            if k["ori"] != ed["ori"]:
+                continue
+            if abs(k["c"] - ed["c"]) > pos_tol:
+                continue
+            lo = max(min(k["a"], k["b"]), min(ed["a"], ed["b"]))
+            hi = min(max(k["a"], k["b"]), max(ed["a"], ed["b"]))
+            overlap = max(0.0, hi - lo)
+            shorter = min(k["len"], ed["len"])
+            if shorter > 0 and overlap / shorter >= overlap_thresh:
+                is_dup = True
+                break
+        if is_dup:
+            dropped.append({**ed, "reason": "near_duplicate_of_longer"})
+        else:
+            kept.append(ed)
+    return kept, dropped
+
+
+def _select_significant(edges, arch_bbox):
+    """
+    Sparser selection — sample has ~19 dims; v18 was producing 16-35 with
+    many noise dims. Keep all perimeter-band edges; for interior, require
+    length ≥ base * 0.15. Cap total at perimeter / 280 (sample density).
+    """
+    xlo, ylo, xhi, yhi = arch_bbox
+    base = max(1.0, min(xhi - xlo, yhi - ylo))
+    perim_band = max(90.0, base * 0.030)
+    interior_min = base * 0.15
+
+    def is_perimeter(ed):
+        if ed["ori"] == "H":
+            return min(abs(ed["c"] - ylo), abs(ed["c"] - yhi)) <= perim_band
+        return min(abs(ed["c"] - xlo), abs(ed["c"] - xhi)) <= perim_band
+
+    kept = []
+    dropped = []
+    for ed in edges:
+        if is_perimeter(ed):
+            kept.append({**ed, "_perim": True})
+        elif ed["len"] >= interior_min:
+            kept.append({**ed, "_perim": False})
+        else:
+            dropped.append({**ed, "reason": "interior_below_significance"})
+
+    apt_perim = 2 * ((xhi - xlo) + (yhi - ylo))
+    target = max(8, min(28, int(apt_perim / 280)))
+    if len(kept) > target:
+        # Importance: perimeter+long first; then long interior.
+        def score(ed):
+            return (1 if ed["_perim"] else 0) * 1e6 + ed["len"]
+        kept.sort(key=score, reverse=True)
+        for ed in kept[target:]:
+            dropped.append({**ed, "reason": "over_target_density"})
+        kept = kept[:target]
+
+    return [{k: v for k, v in ed.items() if k != "_perim"} for ed in kept], dropped
 
 
 def _classify_levels(edges, arch_bbox):
@@ -840,7 +986,12 @@ def process(input_dxf, output_dir):
 
     doc = ezdxf.readfile(str(isolated_dxf))
     raw_edges = _extract_edges(doc)
-    semantic, filtered_out, base = _semantic_merge(raw_edges, arch_bbox)
+    semantic, filtered_short, base = _semantic_merge(raw_edges, arch_bbox)
+    # v18 iteration 2: sample-driven filters
+    semantic, stair_dropped = _filter_staircase(semantic, base)
+    semantic, dup_dropped   = _dedup_near_identical(semantic, base)
+    semantic, sparse_dropped = _select_significant(semantic, arch_bbox)
+    filtered_out = filtered_short + stair_dropped + dup_dropped + sparse_dropped
     classified = _classify_levels(semantic, arch_bbox)
 
     style, dim_txt, dim_asz = _setup_dimstyle(doc, base)
@@ -869,6 +1020,12 @@ def process(input_dxf, output_dir):
         "raw_edges":              len(raw_edges),
         "semantic_edges":         len(semantic),
         "filtered_out_edges":     len(filtered_out),
+        "filter_breakdown": {
+            "short_non_perimeter": len(filtered_short),
+            "staircase_runs":      len(stair_dropped),
+            "near_duplicates":     len(dup_dropped),
+            "below_significance":  len(sparse_dropped),
+        },
         "dimensions_created":     validation["kept"],
         "level_counts":           level_counts,
         "x_axes":                 h_count,
