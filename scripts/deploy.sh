@@ -24,7 +24,7 @@ cd "$(dirname "$0")/../frontend"
 npm install --silent
 npm run build
 echo "      ✓ Build complete (dist/)"
-cd "D:/KortexProjects/navvix"
+cd "C:/KortexProjects/navvix"
 
 # ── 2. Provision server directories ──────────────────────────────────────
 echo ""

@@ -103,6 +103,28 @@ def isolate(input_dxf, output_dxf):
     if not recs:
         raise ValueError("No geometry entities found in DXF")
 
+    # ── v17 fix: trim spatial outliers before clustering ─────────────────────
+    # Title blocks / tables / legends placed far from the floor plan inflate
+    # the global bbox, which in turn inflates the clustering `eps` and causes
+    # disparate features to merge. Drop entity centers that fall outside the
+    # 2–98 percentile band by a generous margin, BEFORE bbox + clustering.
+    outliers_dropped = 0
+    if len(recs) >= 20:
+        cs = np.array([r["c"] for r in recs], float)
+        cx_lo, cx_hi = np.percentile(cs[:, 0], [2, 98])
+        cy_lo, cy_hi = np.percentile(cs[:, 1], [2, 98])
+        span_x = max(cx_hi - cx_lo, 1.0)
+        span_y = max(cy_hi - cy_lo, 1.0)
+        margin_x = span_x * 2.0
+        margin_y = span_y * 2.0
+        keep_mask = (
+            (cs[:, 0] >= cx_lo - margin_x) & (cs[:, 0] <= cx_hi + margin_x) &
+            (cs[:, 1] >= cy_lo - margin_y) & (cs[:, 1] <= cy_hi + margin_y)
+        )
+        outliers_dropped = int((~keep_mask).sum())
+        if outliers_dropped > 0:
+            recs = [r for i, r in enumerate(recs) if keep_mask[i]]
+
     all_pts = [(r["b"][0], r["b"][1]) for r in recs] + [(r["b"][2], r["b"][3]) for r in recs]
     gb = bb(all_pts); gw = gb[2]-gb[0]; gh = gb[3]-gb[1]
 
@@ -162,12 +184,21 @@ def isolate(input_dxf, output_dxf):
     nd = ezdxf.new(dxfversion=doc.dxfversion); nd.units = doc.units
     copy_layers(doc, nd); nm = nd.modelspace()
     copied = 0
+    rejected_outside = 0
     for e in msp:
         ps = entity_pts(e)
         if not ps:
             continue
         etest = bb(ps)
         if not bb_hits(etest, eb):
+            continue
+        # v17 fix: require the entity's *center* to fall inside eb, not just
+        # any corner. A legend at +5000 with one stray line into the plan
+        # otherwise leaks in via bb_hits's overlap check.
+        ecx = (etest[0] + etest[2]) / 2
+        ecy = (etest[1] + etest[3]) / 2
+        if not (eb[0] <= ecx <= eb[2] and eb[1] <= ecy <= eb[3]):
+            rejected_outside += 1
             continue
         ew = etest[2]-etest[0]; eh = etest[3]-etest[1]
         if ew > mw * 0.82 and eh > mh * 0.62:   # large outer frame → skip
@@ -179,11 +210,16 @@ def isolate(input_dxf, output_dxf):
 
     nd.saveas(str(output_dxf))
     return {
-        "global_bbox":   gb,
-        "main_bbox":     mb,
-        "expanded_bbox": eb,
-        "copied":        copied,
-        "clusters":      cluster_infos[:10],
+        "global_bbox":     gb,
+        "main_bbox":       mb,
+        "expanded_bbox":   eb,
+        "copied":          copied,
+        "clusters":        cluster_infos[:10],
+        "v17_fix": {
+            "outliers_dropped":    outliers_dropped,
+            "rejected_outside_eb": rejected_outside,
+            "rule":                "isolate main plan first; exclude legend/table/title/frame before wall extraction",
+        },
     }
 
 

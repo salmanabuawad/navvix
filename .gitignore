@@ -18,3 +18,8 @@ venv/
 /v13d.png
 navvix_v13/test_out_apt01.dxf
 navvix_v13/api_apt01_out.dxf
+
+# v16 sample output binaries (keep only report.json in git)
+examples/v16/*.dxf
+examples/v16/*.png
+examples/v16/*.pdf

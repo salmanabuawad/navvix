@@ -9,6 +9,12 @@ Replicates the reference style:
 
 Dimension style: ISO-25 (dimasz=30, dimtxt=30, dimexo=0.625, dimexe=1.25,
 dimgap=10) — exact match to the reference training files.
+
+v16 fixes (merged in):
+  • Collinear touching edges are re-merged with relaxed tolerances after the
+    initial dedup, catching segments that bucket into slightly-offset positions.
+  • Short non-perimeter transition edges (stair treads, double-line jogs,
+    fixture artifacts) are filtered before dimension placement.
 """
 
 from __future__ import annotations
@@ -155,6 +161,67 @@ def _filter_staircase(segs_by_pos: dict[float, list[tuple[float, float]]],
     return result
 
 
+# ── v16 fixes ────────────────────────────────────────────────────────────────
+
+def _remerge_relaxed(segs_by_pos: dict[float, list[tuple[float, float]]],
+                     pos_tol: float,
+                     span_tol: float,
+                     pos_factor: float = 1.5,
+                     span_factor: float = 2.0,
+                     ) -> tuple[dict[float, list[tuple[float, float]]], int]:
+    """
+    Second-pass collinear merge with relaxed tolerances.
+
+    The initial `_dedup_segments` uses tight tolerances tuned for clean CAD
+    geometry. Real-world drawings often have edges that *should* be one
+    collinear segment but bucket into two slightly-offset positions (e.g.
+    a wall line split by a 0.3-unit perpendicular drift), or touching edges
+    separated by a sub-tolerance gap. This pass rescues them.
+
+    Returns (merged_dict, collapsed_count) where collapsed_count is the number
+    of position-buckets that got absorbed into a neighbour.
+    """
+    before = len(segs_by_pos)
+    merged = _dedup_segments(segs_by_pos, pos_tol * pos_factor, span_tol * span_factor)
+    return merged, max(0, before - len(merged))
+
+
+def _filter_short_non_perimeter(segs_by_pos: dict[float, list[tuple[float, float]]],
+                                perim_lo: float,
+                                perim_hi: float,
+                                min_keep: float,
+                                ) -> tuple[dict[float, list[tuple[float, float]]], list[dict]]:
+    """
+    Drop spans shorter than `min_keep` whose position lies inside the interior
+    band (not within the perimeter band defined by [perim_lo, perim_hi]).
+    Perimeter-band positions are kept regardless of length (short chain
+    segments on the boundary are legitimate).
+
+    Returns (filtered_dict, dropped_records). Each dropped record matches the
+    v16 report schema: {ori_axis_pos: pos, a, b, len, reason}.
+    """
+    kept: dict[float, list[tuple[float, float]]] = {}
+    dropped: list[dict] = []
+    for pos, spans in segs_by_pos.items():
+        on_perimeter = (pos <= perim_lo) or (pos >= perim_hi)
+        if on_perimeter:
+            kept[pos] = spans
+            continue
+        keep_spans: list[tuple[float, float]] = []
+        for a, b in spans:
+            L = b - a
+            if L < min_keep:
+                dropped.append({
+                    "pos": pos, "a": a, "b": b, "len": L,
+                    "reason": "short_non_perimeter_transition_edge",
+                })
+            else:
+                keep_spans.append((a, b))
+        if keep_spans:
+            kept[pos] = keep_spans
+    return kept, dropped
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Public API
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -242,6 +309,10 @@ def apply(isolated_dxf, output_dxf, model_path) -> dict:
     h_dedup = _dedup_segments(h_by_y, pos_tol, span_tol)
     v_dedup = _dedup_segments(v_by_x, pos_tol, span_tol)
 
+    # ── v16 fix: relaxed-tolerance second-pass collinear merge ────────────────
+    h_dedup, h_remerged = _remerge_relaxed(h_dedup, pos_tol, span_tol)
+    v_dedup, v_remerged = _remerge_relaxed(v_dedup, pos_tol, span_tol)
+
     # ── Remove staircase / repetitive elements ────────────────────────────────
     h_before = set(h_dedup.keys())
     v_before = set(v_dedup.keys())
@@ -265,6 +336,15 @@ def apply(isolated_dxf, output_dxf, model_path) -> dict:
     ext_buf_v = max(pos_tol *  6, base_dim * 0.10)
     # Interior exclusion: use the larger of the two so no boundary wall leaks in
     ext_buf   = max(ext_buf_h, ext_buf_v)
+
+    # ── v16 fix: filter short non-perimeter transition edges ──────────────────
+    # Empirical threshold from the v16 reference: filtered edges max at ~115,
+    # smallest legitimate interior dim ~137. Scale by base_dim for larger plans.
+    transition_min_len = max(120.0, base_dim * 0.045)
+    h_dedup, h_transition_dropped = _filter_short_non_perimeter(
+        h_dedup, miny + ext_buf_h, maxy - ext_buf_h, transition_min_len)
+    v_dedup, v_transition_dropped = _filter_short_non_perimeter(
+        v_dedup, minx + ext_buf_v, maxx - ext_buf_v, transition_min_len)
 
     def _sig(spans, min_l):
         return [(a, b) for a, b in spans if (b - a) >= min_l]
@@ -439,4 +519,9 @@ def apply(isolated_dxf, output_dxf, model_path) -> dict:
         "v_count":        by_kind.get("v_int", 0) + by_kind.get("left_chain", 0) + by_kind.get("right_chain", 0),
         "by_kind":        by_kind,
         "model_version":  model.get("version", "v13"),
+        "v16_fixes": {
+            "relaxed_merge_collapsed":      h_remerged + v_remerged,
+            "transition_filter_removed":    len(h_transition_dropped) + len(v_transition_dropped),
+            "transition_filter_threshold":  transition_min_len,
+        },
     }
