@@ -29,7 +29,7 @@ cd "C:/KortexProjects/navvix"
 # ── 2. Provision server directories ──────────────────────────────────────
 echo ""
 echo "[2/6] Provisioning server directories..."
-ssh_run "mkdir -p $APP_DIR/backend $APP_DIR/navvix_v11 $APP_DIR/navvix_v12 $APP_DIR/navvix_v13 $APP_DIR/frontend/dist"
+ssh_run "mkdir -p $APP_DIR/backend $APP_DIR/navvix_v11 $APP_DIR/navvix_v12 $APP_DIR/navvix_v13 $APP_DIR/navvix_v17 $APP_DIR/navvix_v18 $APP_DIR/frontend/dist"
 
 # ── 3. Upload Python code ─────────────────────────────────────────────────
 echo ""
@@ -38,6 +38,8 @@ scp_r "backend/main.py"          "$APP_DIR/backend/main.py"
 scp_r "backend/requirements.txt" "$APP_DIR/backend/requirements.txt"
 scp_r "navvix_v12/"              "$APP_DIR/"
 scp_r "navvix_v13/"              "$APP_DIR/"
+scp_r "navvix_v17/"              "$APP_DIR/"
+scp_r "navvix_v18/"              "$APP_DIR/"
 
 # Create storage + training_files dirs on server
 ssh_run "mkdir -p $APP_DIR/backend/storage $APP_DIR/backend/training_files"

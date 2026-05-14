@@ -82,34 +82,38 @@ def write_meta(job_id: str, meta: dict):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _process_single(job_id: str, meta: dict):
-    """Run isolate + dimension on a single-drawing job dir. Mutates meta."""
+    """Run v18 isolation + dimensioning on a single-drawing job dir. Mutates meta.
+
+    v18 produces output files with v18_* prefixes; rename to canonical names
+    so /api/jobs/{id}/{dxf,pdf} endpoints keep working unchanged.
+    """
+    from navvix_v18.__main__ import process as v18_process
+
     d = job_dir(job_id)
-    iso = d / "isolated_main.dxf"
-    dim = d / "dimensioned.dxf"
-    png = d / "preview.png"
-    pdf = d / "preview.pdf"
+    report = v18_process(d / "input.dxf", d)
 
-    isolate(d / "input.dxf", iso)
+    rename_map = {
+        d / "v18_dimensioned.dxf": d / "dimensioned.dxf",
+        d / "v18_isolated.dxf":    d / "isolated_main.dxf",
+        d / "v18_preview.png":     d / "preview.png",
+        d / "v18_preview.pdf":     d / "preview.pdf",
+    }
+    for src, dst in rename_map.items():
+        if src.exists():
+            if dst.exists():
+                dst.unlink()
+            src.rename(dst)
 
-    if MODEL_PATH.exists():
-        from navvix_v13.applier import apply as apply_v13
-        gen_report = apply_v13(iso, dim, MODEL_PATH)
-        meta["model_used"] = "v13_learned"
-    else:
-        gen_report = generate(iso, dim)
-        meta["model_used"] = "v12_rules"
-
-    gen_preview(dim, png, pdf, tuple(gen_report["bbox"]))
-
-    x_axes = gen_report["x_axes"]
-    y_axes = gen_report["y_axes"]
+    meta["model_used"] = "v18_architectural"
     meta.update({
         "status":        "done",
         "done_at":       datetime.now(timezone.utc).isoformat(),
-        "x_axes":        x_axes if isinstance(x_axes, int) else len(x_axes),
-        "y_axes":        y_axes if isinstance(y_axes, int) else len(y_axes),
-        "dims_total":    gen_report.get("internal_count", len(gen_report.get("dimensions", []))),
-        "dims_internal": gen_report.get("internal_count", 0),
+        "x_axes":        report.get("x_axes", 0),
+        "y_axes":        report.get("y_axes", 0),
+        "dims_total":    report.get("dimensions_created", 0),
+        "dims_internal": report.get("dimensions_created", 0),
+        "v18_levels":    report.get("level_counts", {}),
+        "v18_valid":     report.get("validation", {}).get("valid", False),
     })
 
 
