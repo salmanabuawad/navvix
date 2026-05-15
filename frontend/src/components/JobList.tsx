@@ -1,154 +1,50 @@
-import { Job, api } from '../api';
-import {
-  CheckCircle2, XCircle, Loader2, Clock,
-  Eye, Download, Trash2, FileWarning,
-} from 'lucide-react';
+import { Download, FileText, Trash2 } from 'lucide-react';
+import { api, Job } from '../api';
 
 interface Props {
-  jobs:       Job[];
+  jobs: Job[];
   selectedId: string | null;
-  onSelect:   (job: Job) => void;
-  onDelete:   (id: string) => void;
+  onSelect: (job: Job) => void;
+  onDelete: (id: string) => void;
 }
 
-/* ── Status badge ────────────────────────────────────────────────────────── */
-function StatusBadge({ status }: { status: Job['status'] }) {
-  const cfg = {
-    pending:    { icon: <Clock     className="w-3.5 h-3.5" />, label: 'Pending',    cls: 'bg-slate-100  text-slate-600'  },
-    processing: { icon: <Loader2   className="w-3.5 h-3.5 animate-spin" />, label: 'Processing', cls: 'bg-amber-100 text-amber-700'  },
-    done:       { icon: <CheckCircle2 className="w-3.5 h-3.5" />, label: 'Done',    cls: 'bg-green-100  text-green-700'  },
-    error:      { icon: <XCircle   className="w-3.5 h-3.5" />, label: 'Error',      cls: 'bg-red-100    text-red-700'    },
-  }[status];
-
-  return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${cfg.cls}`}>
-      {cfg.icon}{cfg.label}
-    </span>
-  );
-}
-
-/* ── Helpers ─────────────────────────────────────────────────────────────── */
-function fmtSize(bytes: number): string {
-  if (bytes < 1024)       return `${bytes} B`;
-  if (bytes < 1024**2)    return `${(bytes/1024).toFixed(1)} KB`;
-  return `${(bytes/1024**2).toFixed(1)} MB`;
-}
-
-function fmtDate(iso: string): string {
-  const d = new Date(iso);
-  return d.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' });
-}
-
-/* ── Single job row ──────────────────────────────────────────────────────── */
-function JobRow({ job, selected, onSelect, onDelete }: {
-  job: Job; selected: boolean;
-  onSelect: () => void; onDelete: () => void;
-}) {
-  const done = job.status === 'done';
-
-  return (
-    <div
-      className={[
-        'group rounded-xl border px-4 py-3 transition-all cursor-pointer',
-        selected
-          ? 'border-accent bg-blue-50 shadow-sm'
-          : 'border-border bg-white hover:border-accent/50 hover:shadow-sm',
-      ].join(' ')}
-      onClick={onSelect}
-    >
-      {/* Top row */}
-      <div className="flex items-start justify-between gap-2 min-w-0">
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-semibold text-text truncate" title={job.filename}>
-            {job.filename}
-          </p>
-          <p className="text-xs text-muted mt-0.5">
-            {fmtSize(job.size_bytes)} · {fmtDate(job.created_at)}
-          </p>
-        </div>
-        <StatusBadge status={job.status} />
-      </div>
-
-      {/* Stats (only when done) */}
-      {done && job.dims_total != null && (
-        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted">
-          <span>X axes: <strong className="text-text">{job.x_axes}</strong></span>
-          <span>Y axes: <strong className="text-text">{job.y_axes}</strong></span>
-          <span>Dims: <strong className="text-text">{job.dims_total}</strong></span>
-          <span>Internal: <strong className="text-text">{job.dims_internal}</strong></span>
-        </div>
-      )}
-
-      {/* Error snippet */}
-      {job.status === 'error' && job.error && (
-        <div className="mt-2 flex items-start gap-1.5 text-xs text-red-600 bg-red-50 rounded-lg p-2">
-          <FileWarning className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-          <span className="line-clamp-2 font-mono">{job.error.split('\n').pop()}</span>
-        </div>
-      )}
-
-      {/* Actions */}
-      <div className="mt-3 flex items-center gap-2" onClick={e => e.stopPropagation()}>
-        <button
-          disabled={!done}
-          onClick={onSelect}
-          title="Preview PDF"
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors
-                     disabled:opacity-40 disabled:cursor-not-allowed
-                     bg-accent text-white hover:bg-accent-hover disabled:bg-slate-200 disabled:text-slate-400"
-        >
-          <Eye className="w-3.5 h-3.5" /> Preview
-        </button>
-
-        <a
-          href={done ? api.dxfUrl(job.id) : undefined}
-          download
-          onClick={e => !done && e.preventDefault()}
-          title="Download dimensioned DXF"
-          className={[
-            'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border',
-            done
-              ? 'border-border text-text hover:bg-gray-50'
-              : 'border-transparent text-slate-400 cursor-not-allowed pointer-events-none',
-          ].join(' ')}
-        >
-          <Download className="w-3.5 h-3.5" /> DXF
-        </a>
-
-        <button
-          onClick={onDelete}
-          title="Delete job"
-          className="ml-auto p-1.5 rounded-lg text-muted hover:text-red-600 hover:bg-red-50 transition-colors opacity-0 group-hover:opacity-100"
-        >
-          <Trash2 className="w-3.5 h-3.5" />
-        </button>
-      </div>
-    </div>
-  );
-}
-
-/* ── Job list ─────────────────────────────────────────────────────────────── */
 export function JobList({ jobs, selectedId, onSelect, onDelete }: Props) {
-  if (jobs.length === 0) {
-    return (
-      <div className="flex flex-col items-center justify-center h-40 text-center text-muted text-sm gap-2">
-        <p className="text-3xl opacity-20">📐</p>
-        <p>No drawings yet.</p>
-        <p className="text-xs">Upload a DXF to get started.</p>
-      </div>
-    );
-  }
-
+  if (!jobs.length) return <div className="p-4 text-sm text-slate-500">No drawings yet.</div>;
   return (
-    <div className="flex flex-col gap-2">
-      {jobs.map(job => (
-        <JobRow
+    <div className="space-y-2">
+      {jobs.map((job) => (
+        <button
           key={job.id}
-          job={job}
-          selected={job.id === selectedId}
-          onSelect={() => onSelect(job)}
-          onDelete={() => onDelete(job.id)}
-        />
+          onClick={() => onSelect(job)}
+          className={`w-full rounded-xl border p-3 text-left transition ${selectedId === job.id ? 'border-slate-900 bg-slate-100' : 'border-slate-200 bg-white hover:bg-slate-50'}`}
+        >
+          <div className="flex items-start gap-2">
+            <FileText className="mt-0.5 h-4 w-4 text-slate-600" />
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm font-semibold text-slate-900">{job.filename}</div>
+              <div className="mt-1 text-xs text-slate-500">{job.status}</div>
+              {job.status === 'done' && (
+                <div className="mt-2 flex gap-2">
+                  <a href={api.pdfUrl(job.id)} target="_blank" className="inline-flex items-center gap-1 rounded bg-slate-900 px-2 py-1 text-xs text-white" onClick={(e) => e.stopPropagation()}>
+                    <Download className="h-3 w-3" /> PDF
+                  </a>
+                  <a href={api.dxfUrl(job.id)} className="inline-flex items-center gap-1 rounded bg-slate-200 px-2 py-1 text-xs text-slate-800" onClick={(e) => e.stopPropagation()}>
+                    <Download className="h-3 w-3" /> DXF
+                  </a>
+                </div>
+              )}
+              {job.error && <pre className="mt-2 max-h-24 overflow-auto text-[10px] text-red-700">{job.error}</pre>}
+            </div>
+            <span
+              role="button"
+              tabIndex={0}
+              onClick={(e) => { e.stopPropagation(); onDelete(job.id); }}
+              className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600"
+            >
+              <Trash2 className="h-4 w-4" />
+            </span>
+          </div>
+        </button>
       ))}
     </div>
   );

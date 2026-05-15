@@ -1,5 +1,5 @@
 #!/bin/bash
-# Deploy navvix to navvis.wavelync.com
+# Deploy navvix (backend/app/ + Postgres) to navvis.wavelync.com
 set -e
 
 REMOTE_HOST="185.229.226.37"
@@ -9,69 +9,116 @@ APP_DIR="/opt/navvix"
 DOMAIN="navvis.wavelync.com"
 PORT=8020
 
-ssh_run() { ssh -i "$SSH_KEY" "$REMOTE_USER@$REMOTE_HOST" "$@"; }
-scp_r()   { scp -i "$SSH_KEY" -r "$1" "$REMOTE_USER@$REMOTE_HOST:$2"; }
+ssh_run() { ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new "$REMOTE_USER@$REMOTE_HOST" "$@"; }
+scp_r()   { scp -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -r "$1" "$REMOTE_USER@$REMOTE_HOST:$2"; }
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 echo "=============================="
-echo "  navvix Deployment"
+echo "  navvix deployment"
+echo "  layout: backend/app/, Postgres"
 echo "  → $DOMAIN  ($REMOTE_HOST:$PORT)"
 echo "=============================="
 
 # ── 1. Build frontend ─────────────────────────────────────────────────────
 echo ""
-echo "[1/6] Building frontend..."
-cd "$(dirname "$0")/../frontend"
+echo "[1/7] Building frontend..."
+cd "$REPO_ROOT/frontend"
 npm install --silent
 npm run build
 echo "      ✓ Build complete (dist/)"
-cd "C:/KortexProjects/navvix"
+cd "$REPO_ROOT"
 
-# ── 2. Provision server directories ──────────────────────────────────────
+# ── 2. Provision server directories + clean obsolete versioned dirs ──────
 echo ""
-echo "[2/6] Provisioning server directories..."
-ssh_run "mkdir -p $APP_DIR/backend $APP_DIR/navvix_v11 $APP_DIR/navvix_v12 $APP_DIR/navvix_v13 $APP_DIR/navvix_v17 $APP_DIR/navvix_v18 $APP_DIR/frontend/dist"
+echo "[2/7] Provisioning server..."
+ssh_run "mkdir -p $APP_DIR/frontend/dist"
+ssh_run "rm -rf $APP_DIR/navvix_v11 $APP_DIR/navvix_v12 $APP_DIR/navvix_v13 $APP_DIR/navvix_v17 $APP_DIR/navvix_v18 $APP_DIR/navvix"
 
-# ── 3. Upload Python code ─────────────────────────────────────────────────
+# ── 3. Postgres install + database/user setup ────────────────────────────
 echo ""
-echo "[3/6] Uploading Python modules..."
+echo "[3/7] Postgres setup..."
+ssh_run '
+  if ! dpkg -s postgresql >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql postgresql-contrib
+  fi
+  systemctl enable --now postgresql >/dev/null
+  sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='\''navvix'\''" | grep -q 1 \
+    || sudo -u postgres psql -c "CREATE DATABASE navvix;"
+  sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='\''navvix'\''" | grep -q 1 \
+    || sudo -u postgres psql -c "CREATE USER navvix WITH ENCRYPTED PASSWORD '\''navvix'\'';"
+  sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE navvix TO navvix;" >/dev/null
+  sudo -u postgres psql -d navvix -c "GRANT ALL ON SCHEMA public TO navvix;" >/dev/null
+  echo "      ✓ postgresql ready (db=navvix, user=navvix)"
+'
+
+# ── 4. Upload Python code ────────────────────────────────────────────────
+echo ""
+echo "[4/7] Uploading Python code..."
+ssh_run "rm -rf $APP_DIR/backend/app $APP_DIR/backend/main.py $APP_DIR/backend/requirements.txt $APP_DIR/scripts"
+ssh_run "mkdir -p $APP_DIR/backend"
+scp_r "backend/app"              "$APP_DIR/backend/"
 scp_r "backend/main.py"          "$APP_DIR/backend/main.py"
 scp_r "backend/requirements.txt" "$APP_DIR/backend/requirements.txt"
-scp_r "navvix_v12/"              "$APP_DIR/"
-scp_r "navvix_v13/"              "$APP_DIR/"
-scp_r "navvix_v17/"              "$APP_DIR/"
-scp_r "navvix_v18/"              "$APP_DIR/"
-
-# Create storage + training_files dirs on server
+scp_r "scripts"                  "$APP_DIR/"
+if [ -d samples ]; then
+  ssh_run "rm -rf $APP_DIR/samples && mkdir -p $APP_DIR/samples"
+  scp_r "samples/."             "$APP_DIR/samples/"
+fi
 ssh_run "mkdir -p $APP_DIR/backend/storage $APP_DIR/backend/training_files"
-echo "      ✓ Python files uploaded"
+echo "      ✓ Code uploaded"
 
-# ── 4. Set up venv + install deps ────────────────────────────────────────
+# ── 5. venv + dependencies ───────────────────────────────────────────────
 echo ""
-echo "[4/6] Setting up Python venv..."
+echo "[5/7] Python venv + deps..."
 ssh_run "
   cd $APP_DIR
   if [ ! -d venv ]; then
     python3 -m venv venv
-    echo '      venv created'
   fi
   venv/bin/pip install --quiet --upgrade pip
   venv/bin/pip install --quiet -r backend/requirements.txt
-  echo '      deps installed'
+  echo '      ✓ deps installed'
 "
-echo "      ✓ venv ready"
 
-# ── 5. Upload frontend dist ───────────────────────────────────────────────
+# ── 6. Upload frontend dist ──────────────────────────────────────────────
 echo ""
-echo "[5/6] Uploading frontend..."
+echo "[6/7] Uploading frontend..."
 ssh_run "rm -rf $APP_DIR/frontend/dist && mkdir -p $APP_DIR/frontend/dist"
 scp_r "frontend/dist/." "$APP_DIR/frontend/dist/"
 echo "      ✓ Frontend uploaded"
 
-# ── 6. Nginx + SSL + systemd ──────────────────────────────────────────────
+# ── 7. systemd + nginx + cert ────────────────────────────────────────────
 echo ""
-echo "[6/6] Configuring nginx, SSL, and systemd..."
+echo "[7/7] Configuring systemd + nginx..."
 
-# Write nginx config (HTTP only first, certbot adds HTTPS)
+ssh_run "cat > /etc/systemd/system/navvix-backend.service << 'SVCEOF'
+[Unit]
+Description=navvix FastAPI Backend (app.main)
+After=network.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=exec
+User=root
+Group=root
+WorkingDirectory=$APP_DIR/backend
+Environment=DATABASE_URL=postgresql+psycopg2://navvix:navvix@localhost:5432/navvix
+Environment=STORAGE_DIR=$APP_DIR/backend/storage
+Environment=PYTHONUNBUFFERED=1
+ExecStart=$APP_DIR/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port $PORT --workers 1 --no-access-log
+Restart=always
+RestartSec=5
+StartLimitInterval=60
+StartLimitBurst=3
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF"
+
+# nginx config — idempotent
 ssh_run "cat > /etc/nginx/sites-available/$DOMAIN << 'NGINXEOF'
 server {
     listen 80;
@@ -127,42 +174,13 @@ server {
 }
 NGINXEOF"
 
-# Enable site
 ssh_run "ln -sf /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/$DOMAIN"
-
-# Test nginx config
 ssh_run "nginx -t"
-
-# Reload nginx (HTTP-only first, so certbot can do HTTP-01 challenge)
 ssh_run "systemctl reload nginx"
+ssh_run "certbot --nginx -d $DOMAIN --non-interactive --agree-tos --email admin@wavelync.com --redirect 2>&1 | tail -3"
 
-# Obtain SSL certificate
-ssh_run "certbot --nginx -d $DOMAIN --non-interactive --agree-tos --email admin@wavelync.com --redirect 2>&1 | tail -5"
-
-# Write systemd service
-ssh_run "cat > /etc/systemd/system/navvix-backend.service << 'SVCEOF'
-[Unit]
-Description=navvix FastAPI Backend
-After=network.target
-
-[Service]
-Type=exec
-User=root
-Group=root
-WorkingDirectory=$APP_DIR/backend
-ExecStart=$APP_DIR/venv/bin/uvicorn main:app --host 127.0.0.1 --port $PORT --workers 1 --no-access-log
-Restart=always
-RestartSec=5
-StartLimitInterval=60
-StartLimitBurst=3
-
-[Install]
-WantedBy=multi-user.target
-SVCEOF"
-
-# Enable + start service
 ssh_run "systemctl daemon-reload && systemctl enable navvix-backend && systemctl restart navvix-backend"
-ssh_run "sleep 2 && systemctl is-active navvix-backend && echo 'Backend running on port $PORT'"
+ssh_run "sleep 3 && systemctl is-active navvix-backend && echo '      ✓ backend running on port $PORT'"
 
 echo ""
 echo "=============================="

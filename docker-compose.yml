@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: navvix_postgres
+    environment:
+      POSTGRES_DB: navvix
+      POSTGRES_USER: navvix
+      POSTGRES_PASSWORD: navvix
+    ports:
+      - "5432:5432"
+    volumes:
+      - navvix_pgdata:/var/lib/postgresql/data
+
+volumes:
+  navvix_pgdata:

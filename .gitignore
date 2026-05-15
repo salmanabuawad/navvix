@@ -1,28 +1,28 @@
-node_modules/
+# Python
 __pycache__/
 *.pyc
 *.pyo
-.env
-*.egg-info/
-dist/
-build/
+*.pyd
 .venv/
-venv/
-*.dxf.bak
-/dim_apt01_new_style.pdf
-/dim_apt01_new_style.png
-/ref_apt01.png
-/v12_apt01.png
-/v13_apt01_new.png
-/v13c.png
-/v13d.png
-navvix_v13/test_out_apt01.dxf
-navvix_v13/api_apt01_out.dxf
+.env
 
-# v16 sample output binaries (keep only report.json in git)
-examples/v16/*.dxf
-examples/v16/*.png
-examples/v16/*.pdf
+# Node
+node_modules/
+dist/
+.vite/
 
-# Local mirrors of files downloaded from production server
+# Generated data
+backend/storage/
+backend/training_files/
+backend/*.db
+*.log
+
+# AI/tool internals
+.claude/
+.cursor/
+
+# Git internals from uploaded zips
+.git/
+
+# Local mirror of production state
 server_files/

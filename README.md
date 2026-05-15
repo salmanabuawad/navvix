@@ -1,18 +1,57 @@
-# Navvix V11 Semantic Dimension Engine
+# Navvix
 
-CAD-first semantic dimension engine.
+Production-oriented React/TypeScript + Python/FastAPI + PostgreSQL codebase for DXF architectural dimensioning.
 
-Main idea:
-1. Isolate the inner apartment drawing only.
-2. Ignore frame, title block, legend and tables.
-3. Extract real DXF wall axes.
-4. Generate external chain + overall dimensions.
-5. Add internal dimensions only to semantic rooms/corridors.
-6. Skip living, service, balcony, perimeter recess and niches.
+## Stack
 
-Run:
+- Frontend: React + TypeScript + Vite + Tailwind
+- Backend: Python + FastAPI
+- Database: PostgreSQL via SQLAlchemy
+- CAD engine: Python + ezdxf + matplotlib preview rendering
+
+## Core principle
+
+The engine must not dimension raw CAD lines directly.
+
+Pipeline:
+
+1. Isolate the main architectural plan.
+2. Reject page frames, title blocks, legends, schedules, tables, and notes.
+3. Extract a normalized line registry.
+4. Build local/topological wall groups.
+5. Generate semantic dimension candidates with ownership.
+6. Apply perimeter-first and space-priority strategy.
+7. Render preview and validate output quality.
+
+See:
+
+- `docs/CLAUDE_DO_NOT_OVERWRITE.md`
+- `docs/ENGINE_RULES.md`
+- `prompts/CLAUDE_UPDATE_PROMPT.md`
+
+## Run backend
 
 ```bash
+cd backend
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
 pip install -r requirements.txt
-python -m navvix_v11 --input without.dxf --output-dir out
+cp .env.example .env
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+## Run frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+## PostgreSQL
+
+Use the included `docker-compose.yml`:
+
+```bash
+docker compose up -d postgres
 ```
